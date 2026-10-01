@@ -60,8 +60,7 @@ distributed under the Apache License 2.0. See `licenses/Apache-2.0.txt`, the
 
 ## Source code availability
 
-The complete application source is available from the developer at no charge
-upon request while the source repositories are being prepared. Requests can be made through
-https://github.com/HenryDelMal/vocos.cpp/issues/new?title=Source%20code%20request.
-The source will be provided in a timely manner and at no more than the cost of
-delivery.
+The complete application source is published in the
+[OndaBaja repository](https://github.com/HenryDelMal/OndaBaja) under the MIT
+License. Third-party components retain their respective licenses as described
+above.

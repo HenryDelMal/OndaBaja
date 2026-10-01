@@ -16,6 +16,8 @@ The format is not finalized. A fictional example `radio_list.json` is in [`docs/
 
 Each station URL is expected to point to an EnCodec Live v1 manifest, not a conventional MP3/AAC radio stream. Vocos decodes EnCodec tokens; ordinary radio streams need a standard media player and do not use Vocos. The decoder is fixed to Vocos for compatible 24 kHz mono streams; 48 kHz and unsupported codebook counts are rejected.
 
+For a server implementation that provides EnCodec Live streams to this app, see [EnCodec Live Streamer](https://github.com/HenryDelMal/encodec-live-streamer).
+
 ## Build requirements
 
 - Android Studio, Android SDK 35, JDK 21, Android NDK 27, and CMake 3.22.1.
@@ -23,18 +25,8 @@ Each station URL is expected to point to an EnCodec Live v1 manifest, not a conv
 
 Run `./gradlew :core:ecdc:test :app:testDebugUnitTest assembleDebug` to build.
 
-## Smaller APK build
-
-Use `:app:assembleRelease` for the APK intended for sideloading. Release code and resources are shrunk, unused native EnCodec code is omitted, and native libraries use compressed APK packaging. It includes all three supported architectures and the full, unchanged float32 Vocos model. The release build currently uses the development signing certificate; preserve it for sideloaded app updates.
-
-The catalog parser accepts Markdown-wrapped URLs, but the server should use plain HTTP/HTTPS strings. Text is read as UTF-8. A corrected two-station catalog is in `outputs/emeradios-corrected.json`.
-
-Missing or updated models show a preparation dialog while the app copies the bundled model and validates its SHA-256. The model remains unchanged float32 weights.
-
-The copied EnCodec native implementation and its Kotlin decoder class were deleted. The packaged native library is now named `vocos_android`; ECDC parsing and the decoder interface remain because Vocos reads EnCodec tokens. Only the Vocos model and required license notices remain under assets. The original waveform branding was replaced with a radio icon.
-
 ## Licensing and source availability
 
 Original application source code is licensed under the MIT License in [`LICENSE`](LICENSE). Third-party components retain their own licenses. See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) and the license texts in `app/src/main/assets/licenses/`.
 
-The complete project source is available from the developer at no charge upon request while the source repositories are being prepared. Requests can be made through [GitHub](https://github.com/HenryDelMal/vocos.cpp/issues/new?title=Source%20code%20request). The source will be provided in a timely manner and at no more than the cost of delivery.
+The complete project source is published in the [OndaBaja GitHub repository](https://github.com/HenryDelMal/OndaBaja) under the MIT License. Third-party components retain their own licenses; see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

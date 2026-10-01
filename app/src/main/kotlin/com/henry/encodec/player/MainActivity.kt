@@ -38,7 +38,7 @@ import androidx.compose.ui.unit.sp
 private val ChileRed = Color(0xFF8E2430)
 private val ChileRedLight = Color(0xFFF5E8E6)
 private val WarmBackground = Color(0xFFFAF5F3)
-private const val SOURCE_REQUEST_URL = "https://github.com/HenryDelMal/vocos.cpp/issues/new?title=Source%20code%20request"
+private const val ONDABAJA_REPOSITORY_URL = "https://github.com/HenryDelMal/OndaBaja"
 private enum class RadioPage { STATIONS, SETTINGS, ADVANCED, ABOUT, TECHNOLOGIES, TECHNOLOGY, LICENSE }
 private enum class InterfaceMode(val label: String) { LIGHT("Claro"), DARK("Oscuro"), AUTO("Automático") }
 
@@ -58,17 +58,11 @@ private data class TechnologyProject(
 private val technologies = listOf(
     TechnologyInfo(
         title = "OndaBaja",
-        description = "El código original de la aplicación se publica bajo MIT. El código fuente completo se puede solicitar gratuitamente al desarrollador mientras se prepara su publicación en GitHub.",
+        description = "El código fuente de OndaBaja está publicado bajo la licencia MIT y disponible en el repositorio público del proyecto.",
         projects = listOf(
             TechnologyProject(
                 title = "Repositorio de OndaBaja",
-                url = "https://github.com/HenryDelMal/OndaBaja",
-                licenseTitle = "Ver licencia MIT completa",
-                licenseAsset = "licenses/EmergencyRadioCL-MIT.txt",
-            ),
-            TechnologyProject(
-                title = "Solicitar código fuente al desarrollador",
-                url = SOURCE_REQUEST_URL,
+                url = ONDABAJA_REPOSITORY_URL,
                 licenseTitle = "Ver licencia MIT completa",
                 licenseAsset = "licenses/EmergencyRadioCL-MIT.txt",
             ),
@@ -473,9 +467,9 @@ private fun TechnologyPage(
         AboutSection("Atribución") { Text(technology.description) }
         if (technology.title == "OndaBaja") {
             AboutSection("Código fuente") {
-                Text("El código fuente completo está disponible gratuitamente a solicitud al desarrollador mientras se prepara su publicación en GitHub. Se enviará en un plazo razonable.")
-                OutlinedButton(onClick = { onOpenLink(SOURCE_REQUEST_URL) }, modifier = Modifier.fillMaxWidth()) {
-                    Text("Solicitar código fuente")
+                Text("El código fuente completo está disponible públicamente en el repositorio de OndaBaja.")
+                OutlinedButton(onClick = { onOpenLink(ONDABAJA_REPOSITORY_URL) }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Ver repositorio")
                 }
             }
         }

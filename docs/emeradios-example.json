@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "stations": [
+    {
+      "id": "radio-ejemplo",
+      "name": "Radio de ejemplo",
+      "region": "Región Metropolitana",
+      "description": "Información local y servicio público",
+      "url": "https://radio.example.cl/encodec-live/stream.json"
+    }
+  ]
+}

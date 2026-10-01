@@ -1,0 +1,9 @@
+<resources>
+    <style name="Theme.OndaBaja" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#8E2430</item>
+        <item name="android:navigationBarColor">#FAF5F3</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:statusBarColor">#FAF5F3</item>
+    </style>
+</resources>

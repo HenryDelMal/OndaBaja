@@ -1,6 +1,6 @@
 # OndaBaja
 
-Android app adapted from the EnCodec Android Player. OndaBaja loads its station catalog from a build-time configurable URL and offers a compact station list with live playback controls.
+Android app adapted from the EnCodec Android Player. OndaBaja loads its station catalog from a build-time configurable URL and offers a simple station list with live playback controls.
 
 ## Local build configuration
 

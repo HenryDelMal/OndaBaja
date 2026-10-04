@@ -58,6 +58,26 @@ distributed under the Apache License 2.0. See `licenses/Apache-2.0.txt`, the
 [Kotlin project](https://github.com/JetBrains/kotlin), and the
 [kotlinx.coroutines project](https://github.com/Kotlin/kotlinx.coroutines).
 
+## Cronet and Google Play services
+
+The application uses the Google Play services Cronet client to access
+Chromium's network stack for HTTP/3 over QUIC and HTTP/2. Google Play services
+provides the native Cronet engine at runtime; the engine binaries are not
+bundled in the APK. Android's standard HTTPS connection is used if the Cronet
+provider is unavailable. See the
+[Cronet Android documentation](https://developer.android.com/develop/connectivity/cronet)
+and [Google Play services open source notices](https://developers.google.com/android/guides/opensource).
+The client dependency's bundled component notices and license texts are in
+`app/src/main/assets/licenses/GooglePlayServices-Cronet-ThirdPartyNotices.txt`
+and the About screen.
+
+## Brotli decoder
+
+The app uses the pure Java decoder from
+[google/brotli](https://github.com/google/brotli) to decode Brotli-compressed
+manifest responses. The decoder is distributed under the MIT License. See
+`app/src/main/assets/licenses/Brotli-MIT.txt`.
+
 ## Source code availability
 
 The complete application source is published in the

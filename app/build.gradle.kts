@@ -44,8 +44,8 @@ android {
         applicationId = "cl.cuy.emergencyradio"
         minSdk = 26
         targetSdk = 35
-        versionCode = 68
-        versionName = "1.0.0"
+        versionCode = 99
+        versionName = "1.0.31"
         buildConfigField("String", "STATION_CATALOG_URL", buildConfigString(configuredCatalogUrl))
         buildConfigField("String", "DECODER_MODEL_ASSET", buildConfigString(configuredModelAsset))
         buildConfigField("String", "DECODER_MODEL_SHA256", buildConfigString(configuredModelSha256))
@@ -53,11 +53,11 @@ android {
         buildConfigField("int", "CATALOG_READ_TIMEOUT_MS", configPositiveInt("network.catalogReadTimeoutMs", 12_000).toString())
         buildConfigField("int", "FILE_CONNECT_TIMEOUT_MS", configPositiveInt("network.fileConnectTimeoutMs", 15_000).toString())
         buildConfigField("int", "FILE_READ_TIMEOUT_MS", configPositiveInt("network.fileReadTimeoutMs", 30_000).toString())
-        buildConfigField("int", "LIVE_CONNECT_TIMEOUT_MS", configPositiveInt("network.liveConnectTimeoutMs", 4_000).toString())
-        buildConfigField("int", "LIVE_READ_TIMEOUT_MS", configPositiveInt("network.liveReadTimeoutMs", 5_000).toString())
-        buildConfigField("int", "LIVE_REBUFFER_TARGET_SEGMENTS", configPositiveInt("live.rebufferTargetSegments", 3).toString())
-        buildConfigField("int", "LIVE_MAX_BUFFER_SEGMENTS", configPositiveInt("live.maxBufferSegments", 6).toString())
-        buildConfigField("int", "LIVE_STARTUP_BUFFER_SEGMENTS", configPositiveInt("live.startupBufferSegments", 6).toString())
+        buildConfigField("int", "LIVE_CONNECT_TIMEOUT_MS", configPositiveInt("network.liveConnectTimeoutMs", 1_000).toString())
+        buildConfigField("int", "LIVE_READ_TIMEOUT_MS", configPositiveInt("network.liveReadTimeoutMs", 2_000).toString())
+        buildConfigField("int", "LIVE_BUFFER_TARGET_MS", configPositiveInt("live.bufferTargetMs", 30_000).toString())
+        buildConfigField("int", "LIVE_MAX_BUFFER_SEGMENTS", configPositiveInt("live.maxBufferSegments", 12).toString())
+        buildConfigField("int", "LIVE_STARTUP_LOOKBACK_MS", configPositiveInt("live.startupLookbackMs", 30_000).toString())
         ndk {
             abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86_64")
         }
@@ -90,6 +90,8 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("com.google.android.gms:play-services-cronet:18.1.1")
+    implementation("org.brotli:dec:0.1.2")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
 }

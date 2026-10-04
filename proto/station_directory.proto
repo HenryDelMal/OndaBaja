@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package emeradios;
+
+// Directory of stations and the transports/formats each station supports.
+message StationDirectory {
+  uint32 version = 1;
+  repeated Station stations = 2;
+}
+
+message Station {
+  string id = 1;
+  string name = 2;
+  string url = 3;
+
+  // Optional preserves the distinction between explicitly false and omitted.
+  optional bool protobuf = 4;
+  optional bool tcp = 5;
+  optional string tcp_url = 6;
+}

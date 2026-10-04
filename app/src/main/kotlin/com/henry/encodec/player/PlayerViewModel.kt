@@ -43,6 +43,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -56,6 +57,9 @@ import java.io.ByteArrayInputStream
 import java.io.SequenceInputStream
 import java.lang.ref.WeakReference
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.ceil
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import org.json.JSONArray
@@ -96,6 +100,9 @@ data class RadioStation(
     val streamUrl: String,
     val region: String? = null,
     val description: String? = null,
+    val protobuf: Boolean? = null,
+    val tcp: Boolean? = null,
+    val tcpUrl: String? = null,
 )
 
 enum class RepeatMode {
@@ -144,9 +151,6 @@ private data class MediaPublishKey(
     val livePhase: String?,
 )
 
-internal fun requiredLiveBufferDepth(deliveredSegments: Int, rebufferTarget: Int): Int =
-    if (deliveredSegments == 0) 1 else rebufferTarget.coerceAtLeast(1)
-
 class PlayerViewModel(application: Application) : AndroidViewModel(application) {
     private val playlistStore = PlaylistStore(application)
     private val mutableState = MutableStateFlow(playlistStore.load())
@@ -188,7 +192,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     init {
         clearStalePlaybackService()
         prepareModel()
-        LiveDiagnostics.enabled = mutableState.value.diagnosticsEnabled
+        LiveDiagnostics.configure(application, mutableState.value.diagnosticsEnabled)
         removeObsoleteDecoderModels()
         activeInstance = WeakReference(this)
         viewModelScope.launch {
@@ -220,40 +224,30 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             mutableState.value = mutableState.value.copy(loadingCatalog = true, error = null)
             val loaded = runCatching {
                 withContext(Dispatchers.IO) {
-                    val connection = (URL(BuildConfig.STATION_CATALOG_URL).openConnection() as HttpURLConnection).apply {
-                        connectTimeout = BuildConfig.CATALOG_CONNECT_TIMEOUT_MS
-                        readTimeout = BuildConfig.CATALOG_READ_TIMEOUT_MS
-                        requestMethod = "GET"
-                        setRequestProperty("Accept", "application/json")
-                    }
-                    try {
-                        require(connection.responseCode in 200..299) { "Station list returned HTTP ${connection.responseCode}" }
-                        val root = JSONObject(connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() })
-                        val entries = root.optJSONArray("stations") ?: root.optJSONArray("streams")
-                            ?: error("JSON must contain a 'stations' array")
-                        buildList {
-                            for (i in 0 until entries.length()) {
-                                val item = entries.optJSONObject(i) ?: continue
-                                val name = (item.optString("name").takeIf(String::isNotBlank)
-                                    ?: item.optString("title").takeIf(String::isNotBlank)) ?: continue
-                                val rawStream = (item.optString("url").takeIf(String::isNotBlank)
-                                    ?: item.optString("streamUrl").takeIf(String::isNotBlank)
-                                    ?: item.optString("stream_url").takeIf(String::isNotBlank)) ?: continue
-                                val stream = normalizeStationUrl(rawStream) ?: continue
-                                val uri = Uri.parse(stream)
-                                if (!(uri.scheme.equals("http", true) || uri.scheme.equals("https", true)) || uri.host.isNullOrBlank()) continue
-                                add(RadioStation(
-                                    id = item.optString("id").takeIf(String::isNotBlank) ?: stream,
-                                    name = name,
-                                    streamUrl = stream,
-                                    region = item.optString("region").takeIf(String::isNotBlank)
-                                        ?: item.optString("location").takeIf(String::isNotBlank),
-                                    description = item.optString("description").takeIf(String::isNotBlank),
-                                ))
+                    val urls = stationCatalogUrls(BuildConfig.STATION_CATALOG_URL)
+                    if (urls.protobuf != null) {
+                        try {
+                            val bytes = fetchStationCatalogBytes(urls.protobuf, "application/x-protobuf, application/octet-stream")
+                            StationDirectoryParser.parseProtobuf(bytes).also {
+                                LiveDiagnostics.info("station catalog ready format=protobuf stations=${it.size} bytes=${bytes.size}")
                             }
-                        }.distinctBy { it.id }
-                    } finally {
-                        connection.disconnect()
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (protobufError: Exception) {
+                            LiveDiagnostics.warn(
+                                "protobuf station catalog unavailable or invalid; falling back to JSON " +
+                                    "error=${protobufError.javaClass.simpleName}",
+                            )
+                            val bytes = fetchStationCatalogBytes(urls.json, "application/json")
+                            StationDirectoryParser.parseJson(bytes.toString(Charsets.UTF_8)).also {
+                                LiveDiagnostics.info("station catalog ready format=json stations=${it.size} bytes=${bytes.size}")
+                            }
+                        }
+                    } else {
+                        val bytes = fetchStationCatalogBytes(urls.json, "application/json")
+                        StationDirectoryParser.parseJson(bytes.toString(Charsets.UTF_8)).also {
+                            LiveDiagnostics.info("station catalog ready format=json stations=${it.size} bytes=${bytes.size}")
+                        }
                     }
                 }
             }
@@ -264,6 +258,24 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 error = "Could not load radio list: ${loaded.exceptionOrNull()?.message ?: "network error"}")
         }
     }
+
+    private fun fetchStationCatalogBytes(url: String, accept: String): ByteArray =
+        CronetTransports.withFallback(URL(url)) { connection ->
+            connection.connectTimeout = BuildConfig.CATALOG_CONNECT_TIMEOUT_MS
+            connection.readTimeout = BuildConfig.CATALOG_READ_TIMEOUT_MS
+            connection.requestMethod = "GET"
+            connection.setRequestProperty("Accept", accept)
+            connection.setRequestProperty("Accept-Encoding", HttpCompressionSettings.current().acceptEncoding)
+            val responseCode = connection.responseCode
+            require(responseCode in 200..299) { "Station list returned HTTP $responseCode" }
+            val encoding = connection.contentEncoding
+            LiveDiagnostics.info(
+                "catalog response format=${if (accept.contains("protobuf")) "protobuf" else "json"} " +
+                    "scheme=${connection.url.protocol} contentEncoding=${encoding ?: "identity"} " +
+                    "contentLength=${connection.contentLengthLong}",
+            )
+            HttpContentDecoding.decode(connection.inputStream, encoding).use { it.readBytes() }
+        }
 
     fun playStation(station: RadioStation) {
         if (!mutableState.value.modelReady) return
@@ -862,7 +874,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun toggleDiagnostics() {
         val enabled = !mutableState.value.diagnosticsEnabled
-        LiveDiagnostics.enabled = enabled
+        LiveDiagnostics.configure(getApplication(), enabled)
         mutableState.value = mutableState.value.copy(diagnosticsEnabled = enabled)
         persistPlaylist()
     }
@@ -1052,6 +1064,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         stopInternal(resetProgress = false)
         ensurePlaybackService()
         val generation = playbackGeneration
+        val startupStarted = LiveDiagnostics.nowMs()
+        LiveDiagnostics.info("session start generation=$generation station=${mutableState.value.currentStationId} " +
+            "manifestHost=${Uri.parse(live.manifestUrl).host} manifestPath=${Uri.parse(live.manifestUrl).path} " +
+            "version=${BuildConfig.VERSION_NAME} bufferTargetMs=$LIVE_BUFFER_TARGET_MS")
         playbackJob = viewModelScope.launch {
             mutableState.value = mutableState.value.copy(
                 playing = true,
@@ -1065,13 +1081,36 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             try {
                 decoderMutex.withLock {
                     coroutineScope {
-                            val source = LiveStreamSource(
-                                live.manifestUrl,
-                                networkDispatcher = liveDownloadDispatcher,
+                        val station = mutableState.value.catalog.firstOrNull {
+                            it.id == mutableState.value.currentStationId
+                        }
+                        val tcpEnabled = TcpTransportSettings.current()
+                        val tcpEndpoint = if (tcpEnabled && station?.tcp == true) {
+                            ElTcpEndpoint.parse(station.tcpUrl).also { endpoint ->
+                                if (endpoint == null) LiveDiagnostics.warn(
+                                    "tcp unavailable station=${station.id} reason=invalid_or_missing_tcp_url",
+                                )
+                            }
+                        } else null
+                        if (tcpEnabled && tcpEndpoint == null && station?.tcp != true) {
+                            LiveDiagnostics.info(
+                                "tcp skipped station=${station?.id ?: "unknown"} reason=station_not_tcp_capable",
                             )
+                        }
+                        val source = LiveStreamSource(
+                            live.manifestUrl,
+                            networkDispatcher = liveDownloadDispatcher,
+                            preferProtobuf = station?.protobuf,
+                            tcpEndpoint = tcpEndpoint,
+                        )
+                        currentCoroutineContext()[Job]?.invokeOnCompletion { source.close() }
                             val queue = Channel<DownloadedLiveSegment>(LIVE_PREFETCH_CAPACITY)
                             val buffered = AtomicInteger(0)
-                            val targetBuffer = AtomicInteger(LIVE_REBUFFER_TARGET_SEGMENTS)
+                            val targetBuffer = AtomicInteger(1)
+                            val targetBufferMs = AtomicLong(LIVE_BUFFER_TARGET_MS.toLong())
+                            val segmentDurationMs = AtomicLong(2_000L)
+                            val playbackSink = AtomicReference<AudioTrackSink?>(null)
+                            val bufferedAudioMs = AtomicLong(0)
                             val rebufferEvents = AtomicInteger(0)
                             fun publishBuffer(
                                 status: String? = null,
@@ -1114,45 +1153,57 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                                     // the background until the queue is full.
                                     while (isActive) {
                                         val downloaded = source.nextSegment { status ->
-                                            if (buffered.get() == 0) publishBuffer(status, buffering = true)
+                                            if (buffered.get() == 0) publishBuffer(status,
+                                                buffering = (playbackSink.get()?.queuedAudioMillis() ?: 0L) == 0L)
                                         }
+                                        segmentDurationMs.set((downloaded.durationSeconds * 1_000).toLong().coerceAtLeast(1L))
+                                        targetBuffer.set(ceil(targetBufferMs.get().toDouble() /
+                                            (downloaded.durationSeconds * 1_000)).toInt()
+                                            .coerceIn(1, LIVE_MAX_BUFFER_SEGMENTS))
+                                        val segmentAudioMs = (downloaded.durationSeconds * 1_000).toLong()
                                         if (downloaded.downloadMillis >=
                                             (downloaded.durationSeconds * 1_000).toLong()
                                         ) {
-                                            val previousTarget = targetBuffer.get()
-                                            val newTarget = targetBuffer.updateAndGet { current ->
-                                                (current + 1).coerceAtMost(LIVE_MAX_BUFFER_SEGMENTS)
-                                            }
-                                            if (newTarget != previousTarget) {
-                                                LiveDiagnostics.warn(
-                                                    "slow segment seq=${downloaded.sequence} " +
-                                                        "downloadMs=${downloaded.downloadMillis} " +
-                                                        "durationMs=" +
-                                                        "${(downloaded.durationSeconds * 1_000).toLong()} " +
-                                                        "newTarget=$newTarget",
-                                                )
-                                            }
+                                            LiveDiagnostics.warn(
+                                                "slow segment seq=${downloaded.sequence} " +
+                                                    "downloadMs=${downloaded.downloadMillis} " +
+                                                    "durationMs=" +
+                                                    "${(downloaded.durationSeconds * 1_000).toLong()} " +
+                                                    "rebufferTarget=${targetBuffer.get()}",
+                                            )
                                         }
                                         buffered.incrementAndGet()
+                                        bufferedAudioMs.addAndGet(segmentAudioMs)
+                                        val sendStarted = LiveDiagnostics.nowMs()
                                         try {
                                             queue.send(downloaded)
                                         } catch (error: Throwable) {
+                                            runCatching { downloaded.input.close() }
                                             buffered.decrementAndGet()
+                                            bufferedAudioMs.addAndGet(-segmentAudioMs)
                                             throw error
                                         }
                                         LiveDiagnostics.info(
                                             "queue add seq=${downloaded.sequence} depth=${buffered.get()} " +
                                                 "target=${targetBuffer.get()} capacity=$LIVE_PREFETCH_CAPACITY " +
+                                                "queuedAudioMs=${bufferedAudioMs.get()} " +
+                                                "sendWaitMs=${LiveDiagnostics.nowMs() - sendStarted} " +
                                                 "manifestEdge=${downloaded.reachedManifestEdge}",
                                         )
                                         publishBuffer()
-                                        if (downloaded.reachedManifestEdge) {
-                                            // The manifest supplied a complete batch. Let that
-                                            // buffered audio play before waking Wi-Fi or the
-                                            // cellular modem for another manifest request.
+                                        if (downloaded.paceProducerAfterEnqueue) {
+                                            // Let buffered audio play before starting another
+                                            // sequential fetch when the queue is above its target.
+                                            val pacingStarted = LiveDiagnostics.nowMs()
+                                            if (buffered.get() > targetBuffer.get()) LiveDiagnostics.info(
+                                                "prefetch wait reason=buffer_target seq=${downloaded.sequence} " +
+                                                    "depth=${buffered.get()} queuedAudioMs=${bufferedAudioMs.get()}",
+                                            )
                                             while (isActive && buffered.get() > targetBuffer.get()) {
                                                 kotlinx.coroutines.delay(100)
                                             }
+                                            LiveDiagnostics.info("prefetch resume seq=${downloaded.sequence} " +
+                                                "waitMs=${LiveDiagnostics.nowMs() - pacingStarted} depth=${buffered.get()}")
                                         }
                                     }
                                 } finally {
@@ -1169,6 +1220,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                                 val (decoder, sink) = withContext(Dispatchers.IO) {
                                     decoderFor(config, streamInit.variant) to audioSink(streamInit.variant)
                                 }
+                                playbackSink.set(sink)
                                 LiveDiagnostics.info(
                                     "decoder ready variant=${streamInit.variant.wireName} " +
                                         "elapsedMs=${LiveDiagnostics.nowMs() - decoderStarted}",
@@ -1184,66 +1236,77 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                                         decoder,
                                         sink,
                                         diagnosticsEnabled = { mutableState.value.diagnosticsEnabled },
+                                        diagnosticReporter = LiveDiagnostics::info,
                                     )
                                     liveSession = newSession
                                     var deliveredSegments = 0
-                                    var initialCushionFilled = false
+                                    fun growRecoveryBuffer(): Int {
+                                        val newTargetMs = targetBufferMs.updateAndGet { current ->
+                                            (current + segmentDurationMs.get()).coerceAtMost(
+                                                LIVE_BUFFER_TARGET_MS.toLong() * 3,
+                                            )
+                                        }
+                                        val depth = ceil(newTargetMs.toDouble() / segmentDurationMs.get())
+                                            .toInt().coerceIn(1, LIVE_MAX_BUFFER_SEGMENTS)
+                                        targetBuffer.set(depth)
+                                        val event = rebufferEvents.incrementAndGet()
+                                        LiveDiagnostics.warn("audio rebuffer event=$event delivered=$deliveredSegments " +
+                                            "newTarget=$depth targetAudioMs=$newTargetMs " +
+                                            "producerDone=${producer.isCompleted}")
+                                        return depth
+                                    }
                                     newSession.play(
                                         nextSegment = {
-                                            if (deliveredSegments == 1 && !initialCushionFilled) {
-                                                val requiredDepth = requiredLiveBufferDepth(
-                                                    deliveredSegments,
-                                                    targetBuffer.get(),
-                                                )
-                                                while (buffered.get() < requiredDepth &&
-                                                    !producer.isCompleted
-                                                ) {
-                                                    publishBuffer(
-                                                        "Preparing background queue " +
-                                                            "${buffered.get()}/$requiredDepth…",
-                                                        buffering = false,
-                                                    )
-                                                    kotlinx.coroutines.delay(25)
-                                                }
-                                                initialCushionFilled = true
-                                            }
                                             if (buffered.get() == 0) {
-                                                if (deliveredSegments > 0) {
-                                                    val events = rebufferEvents.incrementAndGet()
-                                                    if (events % REBUFFERS_PER_BUFFER_INCREASE == 0) {
-                                                        targetBuffer.updateAndGet { current ->
-                                                            (current + 1).coerceAtMost(LIVE_MAX_BUFFER_SEGMENTS)
-                                                        }
-                                                    }
-                                                    LiveDiagnostics.warn(
-                                                        "rebuffer event=$events delivered=$deliveredSegments " +
-                                                            "newTarget=${targetBuffer.get()} producerDone=${producer.isCompleted}",
-                                                    )
-                                                }
-                                                val requiredDepth = requiredLiveBufferDepth(
-                                                    deliveredSegments,
-                                                    targetBuffer.get(),
-                                                )
+                                                val audioDrained = sink.queuedAudioMillis() == 0L
+                                                var recoveryBufferGrown = deliveredSegments > 0 && audioDrained
+                                                if (recoveryBufferGrown) growRecoveryBuffer()
+                                                var recoveryCushion = if (recoveryBufferGrown)
+                                                    LiveRecoveryBuffer(segmentDurationMs.get()) else null
+                                                var requiredDepth = recoveryCushion?.preferredDepth ?: 1
+                                                val waitStarted = LiveDiagnostics.nowMs()
+                                                LiveDiagnostics.info("playback wait reason=empty_queue " +
+                                                    "generation=$generation delivered=$deliveredSegments " +
+                                                    "producerDone=${producer.isCompleted} ${sink.diagnosticState()}")
                                                 while (buffered.get() < requiredDepth &&
                                                     !producer.isCompleted
                                                 ) {
+                                                    if (!recoveryBufferGrown && deliveredSegments > 0 &&
+                                                        sink.queuedAudioMillis() == 0L
+                                                    ) {
+                                                        growRecoveryBuffer()
+                                                        recoveryBufferGrown = true
+                                                        recoveryCushion = LiveRecoveryBuffer(segmentDurationMs.get())
+                                                        requiredDepth = recoveryCushion.preferredDepth
+                                                    }
+                                                    if (recoveryCushion?.ready(buffered.get(), LiveDiagnostics.nowMs()) == true) {
+                                                        LiveDiagnostics.info("playback recovery cushion ready depth=${buffered.get()} " +
+                                                            "resumeDepth=$requiredDepth backgroundTarget=${targetBuffer.get()} " +
+                                                            "maximumExtraWaitMs=${recoveryCushion.maximumWaitMs}")
+                                                        break
+                                                    }
                                                     val status = if (deliveredSegments == 0) {
                                                         "Waiting for first live segment…"
                                                     } else {
                                                         "Rebuffering ${buffered.get()}/$requiredDepth segments…"
                                                     }
-                                                    publishBuffer(status, buffering = true)
+                                                    publishBuffer(status, buffering = sink.queuedAudioMillis() == 0L)
                                                     kotlinx.coroutines.delay(50)
                                                 }
+                                                LiveDiagnostics.info("playback resume generation=$generation " +
+                                                    "waitMs=${LiveDiagnostics.nowMs() - waitStarted} depth=${buffered.get()}")
                                             }
                                             val receiveStarted = LiveDiagnostics.nowMs()
                                             val downloaded = queue.receive()
                                             val receiveWaitMs = LiveDiagnostics.nowMs() - receiveStarted
                                             buffered.decrementAndGet()
+                                            bufferedAudioMs.addAndGet(-(downloaded.durationSeconds * 1_000).toLong())
                                             deliveredSegments++
                                             LiveDiagnostics.info(
                                                 "queue take seq=${downloaded.sequence} depth=${buffered.get()} " +
-                                                    "waitMs=$receiveWaitMs delivered=$deliveredSegments",
+                                                    "waitMs=$receiveWaitMs delivered=$deliveredSegments " +
+                                                    "queuedAudioMs=${bufferedAudioMs.get()} " +
+                                                    "sinceStartMs=${LiveDiagnostics.nowMs() - startupStarted}",
                                             )
                                             publishBuffer(
                                                 "Decoding segment ${downloaded.sequence}…",
@@ -1256,7 +1319,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                                                 ),
                                             )
                                             LiveEcdcSegment(
-                                                ByteArrayInputStream(downloaded.bytes),
+                                                downloaded.input,
                                                 downloaded.sequence,
                                                 downloaded.discontinuity,
                                             )
@@ -1279,6 +1342,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                             } finally {
                                 producer.cancelAndJoin()
                                 queue.cancel()
+                                source.close()
                             }
                     }
                 }
@@ -1641,16 +1705,15 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     companion object {
         private var activeInstance: WeakReference<PlayerViewModel>? = null
-        private val LIVE_REBUFFER_TARGET_SEGMENTS = BuildConfig.LIVE_REBUFFER_TARGET_SEGMENTS
+        private val LIVE_BUFFER_TARGET_MS = BuildConfig.LIVE_BUFFER_TARGET_MS
         private val LIVE_MAX_BUFFER_SEGMENTS = BuildConfig.LIVE_MAX_BUFFER_SEGMENTS
         const val MEDIA_CHANNEL_ID = "emergency_radio_playback"
         const val MEDIA_NOTIFICATION_ID = 48
         private const val MEDIA_ACTION_JUMP_TO_LIVE =
             "com.henry.encodec.player.JUMP_TO_LIVE"
-        // The current segment is already in the decoder/AudioTrack, so three
-        // compressed successors provide a four-segment total cushion.
+        // Playback consumes every ready segment; the producer independently
+        // fills a bounded queue and paces manifest requests by buffered audio.
         private val LIVE_PREFETCH_CAPACITY = LIVE_MAX_BUFFER_SEGMENTS
-        private const val REBUFFERS_PER_BUFFER_INCREASE = 1
         private const val STATIC_HEADER_PREFIX_BYTES = 1024
         private const val TRACKS_EXPORT_FORMAT = "encodec-player-tracks-v1"
         private const val STREAMS_EXPORT_FORMAT = "encodec-player-streams-v1"

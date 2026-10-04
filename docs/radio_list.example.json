@@ -4,23 +4,24 @@
     {
       "id": "horizonte-austral",
       "name": "Radio Horizonte Austral",
-      "region": "Puerto Bruma",
-      "description": "Emisora ficticia de noticias y servicio comunitario.",
-      "url": "https://streams.example.com/horizonte-austral/stream.json"
+      "url": "https://streams.example.com/horizonte-austral/stream.json",
+      "protobuf": true,
+      "tcp": true,
+      "tcp_url": "streams.example.com:15600"
     },
     {
       "id": "voces-del-valle",
       "name": "Voces del Valle",
-      "region": "Valle Claro",
-      "description": "Radio ficticia con información local y alertas vecinales.",
-      "url": "https://streams.example.com/voces-del-valle/stream.json"
+      "url": "https://streams.example.com/voces-del-valle/stream.json",
+      "protobuf": false,
+      "tcp": false
     },
     {
       "id": "senal-del-bosque",
       "name": "Señal del Bosque",
-      "region": "Bosque Norte",
-      "description": "Emisora ficticia dedicada a noticias y orientación durante emergencias.",
-      "url": "https://streams.example.com/senal-del-bosque/stream.json"
+      "url": "https://streams.example.com/senal-del-bosque/stream.json",
+      "protobuf": true,
+      "tcp": false
     }
   ]
 }

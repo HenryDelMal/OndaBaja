@@ -4,10 +4,12 @@ import android.util.Log
 import com.henry.encodec.decoder.DecodedPcm
 import com.henry.encodec.decoder.EncodecDecoder
 import com.henry.encodec.ecdc.EcdcReader
+import com.henry.encodec.ecdc.EncodecVariant
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.InputStream
+import java.io.FilterInputStream
 import kotlin.coroutines.coroutineContext
 
 data class LiveEcdcSegment(
@@ -24,6 +26,7 @@ class LiveEcdcPlaybackSession(
     private val decoder: EncodecDecoder,
     private val sharedSink: AudioTrackSink? = null,
     private val diagnosticsEnabled: () -> Boolean = { false },
+    private val diagnosticReporter: ((String) -> Unit)? = null,
 ) {
     @Volatile private var currentSink: AudioTrackSink? = null
     @Volatile private var paused = false
@@ -59,33 +62,62 @@ class LiveEcdcPlaybackSession(
                 // Decode only the first EnCodec frame before starting the
                 // device. This gives AudioTrack about one second of immediate
                 // PCM without delaying startup for a complete live segment.
-                val initialSegment = nextSegment()
+                var initialSegment = nextSegment()
                 sink.flushQueued()
                 var started = false
-                val initialStats = initialSegment.input.use { input ->
-                    decode(input) { pcm ->
-                        if (stopRequested) return@decode false
-                        if (!started) {
-                            sink.start()
-                            if (paused) sink.pause()
-                            started = true
+                var initialStats: SegmentStats? = null
+                while (!stopRequested && initialStats == null) {
+                    report("audio initial segment seq=${initialSegment.sequence} ${sink.diagnosticState()}")
+                    try {
+                        initialStats = initialSegment.input.use { input ->
+                            decode(input) { pcm ->
+                                if (stopRequested) return@decode false
+                                if (!started) {
+                                    sink.start()
+                                    if (paused) sink.pause()
+                                    started = true
+                                    report("audio start seq=${initialSegment.sequence} ${sink.diagnosticState()}")
+                                }
+                                write(sink, pcm)
+                            }
                         }
-                        write(sink, pcm)
+                    } catch (error: java.io.IOException) {
+                        report("audio segment interrupted seq=${initialSegment.sequence} " +
+                            "reason=${error.javaClass.simpleName} message=${error.message}")
+                        sink.flushQueued()
+                        // flushQueued pauses AudioTrack. Restart the first-frame
+                        // path after an interrupted initial segment.
+                        started = false
+                        if (!stopRequested) initialSegment = nextSegment()
                     }
                 }
+                if (!started || stopRequested || initialStats == null) return@withContext
                 logSegment(initialSegment.sequence, initialStats, sink)
-                if (!started || stopRequested) return@withContext
                 if (!stopRequested) onSegmentPlaying(initialSegment.sequence)
                 while (!stopRequested) {
                     coroutineContext.ensureActive()
+                    report("audio request next ${sink.diagnosticState()}")
                     val segment = nextSegment()
+                    report("audio segment begin seq=${segment.sequence} " +
+                        "discontinuity=${segment.discontinuity} ${sink.diagnosticState()}")
                     if (segment.discontinuity) {
-                        sink.flushQueued()
+                        // These are independently decoded ECDC files. A sequence
+                        // jump does not invalidate audio already queued for output.
+                        report("audio discontinuity seq=${segment.sequence} policy=preserve_queued_pcm " +
+                            sink.diagnosticState())
                         if (!paused) sink.resume()
                     }
-                    val stats = segment.input.use { decodeAndWrite(it, sink) }
-                    logSegment(segment.sequence, stats, sink)
-                    if (!stopRequested) onSegmentPlaying(segment.sequence)
+                    try {
+                        val stats = segment.input.use { decodeAndWrite(it, sink) }
+                        logSegment(segment.sequence, stats, sink)
+                        if (!stopRequested) onSegmentPlaying(segment.sequence)
+                    } catch (error: java.io.IOException) {
+                        report("audio segment interrupted seq=${segment.sequence} " +
+                            "reason=${error.javaClass.simpleName} message=${error.message}")
+                        sink.flushQueued()
+                        if (!paused && !stopRequested) sink.resume()
+                        report("audio output recovered seq=${segment.sequence} ${sink.diagnosticState()}")
+                    }
                 }
             } finally {
                 currentSink = null
@@ -108,7 +140,29 @@ class LiveEcdcPlaybackSession(
             val started = System.nanoTime()
             return emit(pcm).also { writeNanos += System.nanoTime() - started }
         }
-        EcdcReader(input, rightContextTimeSteps = decoder.rightContextTimeSteps).use { reader ->
+        // EcdcReader buffers ahead and closes its input when the last codec
+        // frame has been decoded. For ranged live downloads, drain on close so
+        // the transfer can finish and its length/hash validation can complete.
+        val drainOnClose = object : FilterInputStream(input) {
+            override fun close() {
+                if (stopRequested) {
+                    super.close()
+                } else {
+                    val buffer = ByteArray(8 * 1024)
+                    while (read(buffer) >= 0) Unit
+                    super.close()
+                }
+            }
+        }
+        EcdcReader(
+            drainOnClose,
+            rightContextTimeSteps = decoder.rightContextTimeSteps,
+            // One-second causal chunks let the 24 kHz stream begin decoding
+            // before a longer segment finishes downloading. Static-file
+            // playback keeps EcdcReader's larger four-second default.
+            monoChunkSamples = if (decoder.variant == EncodecVariant.MONO_24_KHZ) LIVE_MONO_CHUNK_SAMPLES
+                else EcdcReader.MONO_CHUNK_SAMPLES,
+        ).use { reader ->
             require(reader.header.variant == decoder.variant) {
                 "Live segment uses ${reader.header.variant.wireName}, decoder is ${decoder.variant.wireName}"
             }
@@ -165,13 +219,17 @@ class LiveEcdcPlaybackSession(
     private fun logSegment(sequence: Long, stats: SegmentStats, sink: AudioTrackSink) {
         if (!diagnosticsEnabled()) return
         val audioMs = stats.decodedFrames * 1_000L / decoder.variant.sampleRate
+        report(
+            "play segment seq=$sequence codecFrames=${stats.codecFrames} audioMs=$audioMs " +
+                "wallMs=${stats.wallMs} decodeMs=${stats.decodeMs} writeMs=${stats.writeMs} " +
+                "${sink.diagnosticState()} thread=${Thread.currentThread().name}",
+        )
+    }
+
+    private fun report(message: String) {
+        if (!diagnosticsEnabled()) return
         runCatching {
-            Log.i(
-                LIVE_LOG_TAG,
-                "play segment seq=$sequence codecFrames=${stats.codecFrames} audioMs=$audioMs " +
-                    "wallMs=${stats.wallMs} decodeMs=${stats.decodeMs} writeMs=${stats.writeMs} " +
-                    "playedFrames=${sink.playedFrames()} thread=${Thread.currentThread().name}",
-            )
+            diagnosticReporter?.invoke(message) ?: Log.i(LIVE_LOG_TAG, message)
         }
     }
 
@@ -210,5 +268,6 @@ class LiveEcdcPlaybackSession(
 
     private companion object {
         const val LIVE_LOG_TAG = "EnCodecLive"
+        const val LIVE_MONO_CHUNK_SAMPLES = 24_000
     }
 }

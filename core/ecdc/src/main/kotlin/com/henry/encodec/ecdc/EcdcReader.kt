@@ -7,11 +7,17 @@ import java.nio.charset.StandardCharsets
 import kotlin.math.ceil
 import kotlin.math.min
 
-class EcdcReader(input: InputStream, initialFrameIndex: Int = 0, private val rightContextTimeSteps: Int = 0) : AutoCloseable {
+class EcdcReader(
+    input: InputStream,
+    initialFrameIndex: Int = 0,
+    private val rightContextTimeSteps: Int = 0,
+    private val monoChunkSamples: Int = MONO_CHUNK_SAMPLES,
+) : AutoCloseable {
     init { require(rightContextTimeSteps in 0..75) }
+    init { require(monoChunkSamples in 320..MONO_CHUNK_SAMPLES && monoChunkSamples % 320 == 0) }
     private val source = DataInputStream(BufferedInputStream(input))
     val header: EcdcHeader = readHeader(source)
-    private val frameCount = frameCount(header)
+    private val frameCount = frameCount(header, monoChunkSamples)
     private var framesRead = initialFrameIndex.also {
         require(it in 0..frameCount) { "Invalid initial ECDC frame index: $it" }
     }
@@ -73,10 +79,10 @@ class EcdcReader(input: InputStream, initialFrameIndex: Int = 0, private val rig
      * every two seconds of audio, which was too expensive on phones.
      */
     private fun readMonoChunk(): EcdcFrame {
-        val outputOffset = framesRead.toLong() * MONO_CHUNK_SAMPLES
+        val outputOffset = framesRead.toLong() * monoChunkSamples
         val outputLength = min(
             header.audioLengthSamples - outputOffset,
-            MONO_CHUNK_SAMPLES.toLong(),
+            monoChunkSamples.toLong(),
         ).toInt()
         val newTimeSteps = ceil(
             outputLength.toDouble() * header.variant.frameRate / header.variant.sampleRate,
@@ -205,9 +211,9 @@ class EcdcReader(input: InputStream, initialFrameIndex: Int = 0, private val rig
             }
         }
 
-        private fun frameCount(header: EcdcHeader): Int {
+        private fun frameCount(header: EcdcHeader, monoChunkSamples: Int): Int {
             if (header.variant == EncodecVariant.MONO_24_KHZ) {
-                return ceil(header.audioLengthSamples.toDouble() / MONO_CHUNK_SAMPLES).toInt()
+                return ceil(header.audioLengthSamples.toDouble() / monoChunkSamples).toInt()
             }
             val stride = header.variant.segmentStrideSamples ?: return 1
             return ceil(header.audioLengthSamples.toDouble() / stride).toInt()

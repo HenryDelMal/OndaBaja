@@ -12,6 +12,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -30,6 +31,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import cl.cuy.emergencyradio.R
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -51,8 +56,8 @@ private data class TechnologyInfo(
 private data class TechnologyProject(
     val title: String,
     val url: String,
-    val licenseTitle: String,
-    val licenseAsset: String,
+    val licenseTitle: String? = null,
+    val licenseAsset: String? = null,
 )
 
 private val technologies = listOf(
@@ -131,6 +136,24 @@ private val technologies = listOf(
             TechnologyProject("Proyecto kotlinx.coroutines", "https://github.com/Kotlin/kotlinx.coroutines", "Ver licencia Apache 2.0 completa", "licenses/Apache-2.0.txt"),
         ),
     ),
+    TechnologyInfo(
+        title = "Cronet y Google Play services",
+        description = "Cronet permite negociar HTTP/3 sobre QUIC y HTTP/2 mediante Google Play services. Si el proveedor no está disponible, la aplicación vuelve a la conexión HTTPS estándar de Android. El motor nativo se entrega desde Google Play services y no se incluye en el APK.",
+        projects = listOf(
+            TechnologyProject("Documentación de Cronet para Android", "https://developer.android.com/develop/connectivity/cronet", "Ver avisos y licencias completas", "licenses/GooglePlayServices-Cronet-ThirdPartyNotices.txt"),
+            TechnologyProject("Avisos de código abierto de Google Play services", "https://developers.google.com/android/guides/opensource"),
+        ),
+    ),
+    TechnologyInfo(
+        title = "Brotli",
+        description = "OndaBaja acepta manifiestos comprimidos con Brotli para reducir los bytes transferidos. La biblioteca decodificadora de Java permite recuperar el JSON original en el dispositivo.",
+        projects = listOf(TechnologyProject(
+            "Proyecto Brotli de Google",
+            "https://github.com/google/brotli",
+            "Ver licencia MIT completa",
+            "licenses/Brotli-MIT.txt",
+        )),
+    ),
 )
 
 class MainActivity : ComponentActivity() {
@@ -199,6 +222,9 @@ private fun EmergencyRadioScreen(model: PlayerViewModel, mode: InterfaceMode, on
     var selectedLicense by remember { mutableStateOf(TechnologyProject("", "", "", "")) }
     val context = LocalContext.current
     val settings = remember(context) { context.getSharedPreferences("emergency_radio_settings", Context.MODE_PRIVATE) }
+    var networkProtocol by remember { mutableStateOf(NetworkProtocolSettings.current()) }
+    var compressionPreference by remember { mutableStateOf(HttpCompressionSettings.current()) }
+    var tcpEnabled by remember { mutableStateOf(TcpTransportSettings.current()) }
     var starredIds by remember {
         mutableStateOf(settings.getStringSet("starred_station_ids", emptySet()).orEmpty().toSet())
     }
@@ -231,8 +257,12 @@ private fun EmergencyRadioScreen(model: PlayerViewModel, mode: InterfaceMode, on
 
     Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 20.dp)) {
         Row(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(44.dp).background(ChileRed, CircleShape), contentAlignment = Alignment.Center) {
-                Text("OB", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Black)
+            Box(Modifier.size(44.dp).background(WarmBackground, CircleShape), contentAlignment = Alignment.Center) {
+                Image(
+                    painterResource(R.drawable.ic_ondabaja_logo),
+                    contentDescription = "OndaBaja",
+                    modifier = Modifier.size(34.dp),
+                )
             }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
@@ -342,7 +372,24 @@ private fun EmergencyRadioScreen(model: PlayerViewModel, mode: InterfaceMode, on
                 NowPlayingCard(state, model)
             }
             RadioPage.SETTINGS -> SettingsPage(Modifier.weight(1f), mode, onModeChange, onAdvanced = { page = RadioPage.ADVANCED })
-            RadioPage.ADVANCED -> AdvancedSettingsPage(Modifier.weight(1f), state.diagnosticsEnabled, model::toggleDiagnostics)
+            RadioPage.ADVANCED -> AdvancedSettingsPage(
+                Modifier.weight(1f), state.diagnosticsEnabled, model::toggleDiagnostics,
+                networkProtocol = networkProtocol,
+                compressionPreference = compressionPreference,
+                tcpEnabled = tcpEnabled,
+                onNetworkProtocolChange = {
+                    networkProtocol = it
+                    NetworkProtocolSettings.set(context, it)
+                },
+                onCompressionPreferenceChange = {
+                    compressionPreference = it
+                    HttpCompressionSettings.set(context, it)
+                },
+                onTcpEnabledChange = {
+                    tcpEnabled = it
+                    TcpTransportSettings.set(context, it)
+                },
+            )
             RadioPage.ABOUT -> AboutPage(Modifier.weight(1f),
                 onTechnologies = { page = RadioPage.TECHNOLOGIES })
             RadioPage.TECHNOLOGIES -> TechnologiesPage(Modifier.weight(1f)) { technology ->
@@ -384,20 +431,123 @@ private fun SettingsPage(modifier: Modifier, mode: InterfaceMode, onModeChange: 
 }
 
 @Composable
-private fun AdvancedSettingsPage(modifier: Modifier, debugLogs: Boolean, onDebugChange: () -> Unit) {
+@OptIn(ExperimentalMaterial3Api::class)
+private fun AdvancedSettingsPage(
+    modifier: Modifier,
+    debugLogs: Boolean,
+    onDebugChange: () -> Unit,
+    networkProtocol: NetworkProtocolMode,
+    compressionPreference: HttpCompressionPreference,
+    tcpEnabled: Boolean,
+    onNetworkProtocolChange: (NetworkProtocolMode) -> Unit,
+    onCompressionPreferenceChange: (HttpCompressionPreference) -> Unit,
+    onTcpEnabledChange: (Boolean) -> Unit,
+) {
     Column(modifier.fillMaxWidth().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        SettingsSection("Transporte TCP personalizado") {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Usar TCP cuando la emisora lo admita", fontWeight = FontWeight.Medium)
+                    Text("Está activado de forma predeterminada cuando la emisora anuncia tcp=true y tcp_url. Si TCP no conecta al iniciar, usa HTTP/HTTPS. Si se interrumpe después, intenta reconectar por TCP.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(checked = tcpEnabled, onCheckedChange = onTcpEnabledChange)
+            }
+            Text("ELTCP no cifra ni comprime los datos. Desactívalo si prefieres HTTP/HTTPS. El cambio se aplica al iniciar la reproducción.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        SettingsSection("Protocolo de red") {
+            var expanded by remember { mutableStateOf(false) }
+            ExposedDropdownMenuBox(
+                expanded = expanded,
+                onExpandedChange = { expanded = !expanded },
+            ) {
+                OutlinedTextField(
+                    value = networkProtocol.label,
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text("Protocolo") },
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                    modifier = Modifier.fillMaxWidth().menuAnchor(),
+                )
+                ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                    NetworkProtocolMode.entries.forEach { option ->
+                        DropdownMenuItem(
+                            text = { Text(option.label) },
+                            onClick = {
+                                onNetworkProtocolChange(option)
+                                expanded = false
+                            },
+                        )
+                    }
+                }
+            }
+            Text(
+                when (networkProtocol) {
+                    NetworkProtocolMode.DEFAULT -> "Usa HTTP/3 cuando está disponible, con fallback a HTTP/2 y HTTPS."
+                    NetworkProtocolMode.HTTP3 -> "Prefiere HTTP/3 y continúa con HTTP/2 o HTTPS si hace falta."
+                    NetworkProtocolMode.HTTP2 -> "Usa HTTP/2 y continúa con HTTPS estándar si hace falta."
+                    NetworkProtocolMode.HTTPS -> "Usa HTTPS estándar de Android."
+                    NetworkProtocolMode.HTTP -> "Usa HTTP sin cifrado. Las solicitudes y el audio pueden ser observados o modificados en tránsito."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        SettingsSection("Compresión HTTP preferida") {
+            var compressionExpanded by remember { mutableStateOf(false) }
+            ExposedDropdownMenuBox(
+                expanded = compressionExpanded,
+                onExpandedChange = { compressionExpanded = !compressionExpanded },
+            ) {
+                OutlinedTextField(
+                    value = compressionPreference.label,
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text("Compresión") },
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = compressionExpanded) },
+                    modifier = Modifier.fillMaxWidth().menuAnchor(),
+                )
+                ExposedDropdownMenu(
+                    expanded = compressionExpanded,
+                    onDismissRequest = { compressionExpanded = false },
+                ) {
+                    HttpCompressionPreference.entries.forEach { option ->
+                        DropdownMenuItem(
+                            text = { Text(option.label) },
+                            onClick = {
+                                onCompressionPreferenceChange(option)
+                                compressionExpanded = false
+                            },
+                        )
+                    }
+                }
+            }
+            Text(
+                when (compressionPreference) {
+                    HttpCompressionPreference.DEFAULT -> "Prefiere Brotli, luego GZip y finalmente respuestas sin comprimir."
+                    HttpCompressionPreference.BROTLI -> "Solicita Brotli cuando el servidor lo admite."
+                    HttpCompressionPreference.GZIP -> "Solicita GZip cuando el servidor lo admite."
+                    HttpCompressionPreference.UNCOMPRESSED -> "Solicita respuestas sin comprimir."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         SettingsSection("Registros de depuración") {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("Registros para desarrolladores", fontWeight = FontWeight.Medium)
-                    Text("Consulta los mensajes con adb logcat.", style = MaterialTheme.typography.bodySmall,
+                    Text("Registra métricas de red en el dispositivo para consultarlas después, incluso si se pierde la conexión.", style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Switch(checked = debugLogs, onCheckedChange = { onDebugChange() })
             }
-            Text("Los registros incluyen tiempos y tamaños de las respuestas HTTP para ayudar a diagnosticar la reproducción. No miden por sí solos todos los bytes TCP, TLS e IP.",
+            Text("Se guardan los tiempos de respuesta y descarga, bytes de contenido, tráfico total aproximado de la aplicación, reintentos, errores y cambios de red (tipo y velocidad estimada). Los registros quedan en el teléfono aunque no haya conexión. Para capturarlos en una APK de lanzamiento: adb logcat -v threadtime -s EnCodecLive:I EnCodecDecoder:I. Los registros privados permanecen en el teléfono, pero run-as no está disponible en una APK de lanzamiento.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("Para revisar el consumo total atribuido a la aplicación, consulta el uso de datos en los ajustes de Android. Esa cifra incluye el tráfico cifrado y es una estimación más completa del coste de red que los tamaños HTTP registrados por la aplicación.",
+            Text("El tráfico total es una estimación a nivel de la aplicación e incluye otros intercambios de red que coincidan durante cada medición. Android no expone por separado el coste de DNS, TCP, TLS y cabeceras HTTP para cada solicitud.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
@@ -479,7 +629,11 @@ private fun TechnologyPage(
                     Text("Abrir proyecto", modifier = Modifier.weight(1f))
                     Text("↗")
                 }
-                Button(onClick = { onLicense(project) }, modifier = Modifier.fillMaxWidth()) { Text(project.licenseTitle) }
+                if (project.licenseAsset != null && project.licenseTitle != null) {
+                    Button(onClick = { onLicense(project) }, modifier = Modifier.fillMaxWidth()) {
+                        Text(project.licenseTitle)
+                    }
+                }
             }
         }
     }
@@ -490,7 +644,7 @@ private fun LicensePage(modifier: Modifier, project: TechnologyProject) {
     val context = LocalContext.current
     val licenseText = remember(project.licenseAsset) {
         runCatching {
-            context.assets.open(project.licenseAsset).bufferedReader().use { it.readText() }
+            context.assets.open(requireNotNull(project.licenseAsset)).bufferedReader().use { it.readText() }
         }.getOrElse { "No se pudo cargar el texto de esta licencia." }
     }
     Column(modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(bottom = 18.dp)) {
@@ -573,7 +727,18 @@ private fun NowPlayingCard(state: PlayerState, model: PlayerViewModel) {
                 enabled = station != null && state.modelReady,
                 modifier = Modifier.size(48.dp).background(Color.White, CircleShape),
             ) {
-                Text(if (state.playing) "■" else "▶", color = ChileRed, fontWeight = FontWeight.Bold, fontSize = 19.sp)
+                Box(contentAlignment = Alignment.Center) {
+                    if (state.playing && state.live?.buffering == true) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(40.dp).semantics {
+                                contentDescription = "Cargando audio"
+                            },
+                            color = ChileRed,
+                            strokeWidth = 2.dp,
+                        )
+                    }
+                    Text(if (state.playing) "■" else "▶", color = ChileRed, fontWeight = FontWeight.Bold, fontSize = 19.sp)
+                }
             }
             IconButton(onClick = model::nextStation, enabled = station != null && state.modelReady) { Text("▶", color = Color.White) }
         }

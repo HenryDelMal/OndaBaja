@@ -15,7 +15,7 @@ class AudioTrackSink(
     val channels: Int,
     private val diagnosticsEnabled: () -> Boolean = { false },
 ) : AutoCloseable {
-    private var framesWritten = 0L
+    @Volatile private var framesWritten = 0L
     private val channelMask = if (channels == 1) {
         AudioFormat.CHANNEL_OUT_MONO
     } else {
@@ -164,6 +164,13 @@ class AudioTrackSink(
 
     /** Number of PCM frames that have actually reached the playback device. */
     fun playedFrames(): Long = track.playbackHeadPosition.toLong() and 0xffff_ffffL
+
+    fun queuedAudioMillis(): Long =
+        (framesWritten - playedFrames()).coerceAtLeast(0) * 1_000 / sampleRate
+
+    fun diagnosticState(): String =
+        "pcmQueuedMs=${queuedAudioMillis()} " +
+            "underruns=${track.underrunCount} playState=${track.playState} playedFrames=${playedFrames()}"
 
     private val writeChunkSamples: Int
         get() = (sampleRate / AUDIO_WRITE_CHUNKS_PER_SECOND).coerceAtLeast(1) * channels

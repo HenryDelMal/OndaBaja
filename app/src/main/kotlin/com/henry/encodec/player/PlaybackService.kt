@@ -31,6 +31,12 @@ class PlaybackService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        PlayerViewModel.dispatchMediaAction(MainActivity.ACTION_STOP)
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
         if (wakeLock?.isHeld == true) wakeLock?.release()
         wakeLock = null

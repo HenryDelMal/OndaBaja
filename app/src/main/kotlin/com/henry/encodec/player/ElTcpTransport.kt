@@ -34,16 +34,14 @@ data class ElTcpEndpoint(val host: String, val port: Int) {
 
 internal class ElTcpConnectException(message: String, cause: IOException) : IOException(message, cause)
 private class ElTcpReplyTimeoutException(cause: SocketTimeoutException) : IOException(cause)
+private class ElTcpFetchReplyTimeoutException(cause: SocketTimeoutException) : IOException(cause)
 internal class ElTcpSegmentUnavailableException(
     val sequence: Long,
     val freshManifest: ByteArray,
 ) : IOException("ELTCP absolute segment is stale or unavailable")
 internal class ElTcpFetchUnsupportedException : IOException("ELTCP server does not support absolute-sequence fetch")
 
-internal sealed interface ElTcpFetchResult {
-    data class Ready(val bytes: ByteArray, val crc32c: Long, val discontinuity: Boolean) : ElTcpFetchResult
-    data object NotPublished : ElTcpFetchResult
-}
+internal data class ElTcpFetchResult(val bytes: ByteArray, val crc32c: Long, val discontinuity: Boolean)
 
 internal object TcpTransportSettings {
     private const val PREFS = "emergency_radio_settings"
@@ -241,19 +239,51 @@ internal class ElTcpSession(private val endpoint: ElTcpEndpoint) : Closeable {
 
         val started = LiveDiagnostics.nowMs()
         var crcRetries = 0
+        var sameSocketRetries = 0
+        var unpublishedRetries = 0
+        var pendingCommand = CMD_FETCH
+        var sendPendingCommand = true
         var previousMetadata: FetchMetadata? = null
         try {
+            // f is a single request/response exchange, so only probe after the
+            // previous exchange has ended and before starting this one.
+            probeIfDue()
             setReadTimeout(SEGMENT_READ_TIMEOUT_MS)
-            writeCommand(CMD_FETCH)
-            writeVarint(sequence)
-            output?.flush() ?: throw IOException("ELTCP output is closed")
-            LiveDiagnostics.info(
-                "tcp fetch request seq=$sequence expectedBytes=${expectedByteLength ?: "unknown"} " +
-                    "readTimeoutMs=$SEGMENT_READ_TIMEOUT_MS",
-            )
-
             while (true) {
-                when (val reply = readFetchReply()) {
+                if (sendPendingCommand) {
+                    writeCommand(pendingCommand)
+                    if (pendingCommand == CMD_FETCH) writeVarint(sequence)
+                    output?.flush() ?: throw IOException("ELTCP output is closed")
+                    sendPendingCommand = false
+                    LiveDiagnostics.info(
+                        "tcp fetch request seq=$sequence command=${pendingCommand.toInt().toChar()} " +
+                            "expectedBytes=${expectedByteLength ?: "unknown"} " +
+                            "readTimeoutMs=$SEGMENT_READ_TIMEOUT_MS sameSocketRetry=$sameSocketRetries",
+                    )
+                }
+                val reply = try {
+                    readFetchReply()
+                } catch (_: ElTcpFetchReplyTimeoutException) {
+                    if (sameSocketRetries >= MAX_SAME_SOCKET_SEGMENT_RETRIES) {
+                        throw SocketTimeoutException(
+                            "ELTCP f sequence $sequence timed out after $sameSocketRetries same-socket retries",
+                        )
+                    }
+                    when (val recovery = probeAfterFetchTimeout(sequence)) {
+                        FetchTimeoutRecovery.RetryRequest -> {
+                            sameSocketRetries++
+                            LiveDiagnostics.warn(
+                                "tcp fetch retry on same socket seq=$sequence retry=$sameSocketRetries " +
+                                    "command=${pendingCommand.toInt().toChar()}",
+                            )
+                            setReadTimeout(SEGMENT_READ_TIMEOUT_MS)
+                            sendPendingCommand = true
+                            continue
+                        }
+                        is FetchTimeoutRecovery.Response -> recovery.reply
+                    }
+                }
+                when (reply) {
                     is FetchReply.Ready -> {
                         if (reply.bytes.isEmpty() || reply.bytes.size > LiveManifestParser.MAX_SEGMENT_BYTES) {
                             throw IOException("ELTCP S frame has invalid ECDC length ${reply.bytes.size}")
@@ -276,13 +306,13 @@ internal class ElTcpSession(private val endpoint: ElTcpEndpoint) : Closeable {
                             }
                             previousMetadata = reply.metadata
                             crcRetries++
+                            pendingCommand = CMD_CRC_ERROR
                             LiveDiagnostics.warn(
                                 "tcp fetch checksum mismatch seq=$sequence retry=$crcRetries " +
                                     "bytes=${reply.bytes.size}; requesting same S frame again",
                             )
                             // The complete S frame has been consumed and failed CRC validation.
-                            writeCommand(CMD_CRC_ERROR)
-                            output?.flush() ?: throw IOException("ELTCP output is closed")
+                            sendPendingCommand = true
                             continue
                         }
                         if (previousMetadata != null && previousMetadata != reply.metadata) {
@@ -293,7 +323,7 @@ internal class ElTcpSession(private val endpoint: ElTcpEndpoint) : Closeable {
                                 "crc32c=valid retries=$crcRetries discontinuity=${reply.flags and FLAG_DISCONTINUITY != 0} " +
                                 "elapsedMs=${LiveDiagnostics.nowMs() - started}",
                         )
-                        return@cancellableIo ElTcpFetchResult.Ready(
+                        return@cancellableIo ElTcpFetchResult(
                             bytes = reply.bytes,
                             crc32c = reply.crc32c,
                             discontinuity = reply.flags and FLAG_DISCONTINUITY != 0,
@@ -301,8 +331,14 @@ internal class ElTcpSession(private val endpoint: ElTcpEndpoint) : Closeable {
                     }
                     FetchReply.NotPublished -> {
                         if (crcRetries > 0) throw IOException("ELTCP did not resend the S frame after e for sequence $sequence")
-                        LiveDiagnostics.info("tcp fetch not_published seq=$sequence retryDelayMs=$FETCH_NOT_PUBLISHED_DELAY_MS")
-                        return@cancellableIo ElTcpFetchResult.NotPublished
+                        unpublishedRetries++
+                        LiveDiagnostics.info(
+                            "tcp fetch not_published seq=$sequence retry=immediate " +
+                                "sameSequence=true attempts=$unpublishedRetries",
+                        )
+                        pendingCommand = CMD_FETCH
+                        sendPendingCommand = true
+                        continue
                     }
                     FetchReply.Gone -> {
                         if (crcRetries > 0) throw IOException("ELTCP returned g instead of retrying S after e for sequence $sequence")
@@ -317,9 +353,18 @@ internal class ElTcpSession(private val endpoint: ElTcpEndpoint) : Closeable {
                         LiveDiagnostics.warn("tcp fetch unsupported; reconnecting and switching to legacy m/s requests")
                         throw ElTcpFetchUnsupportedException()
                     }
+                    FetchReply.Heartbeat -> {
+                        // Tolerate a server heartbeat if one arrives while f
+                        // is pending; it does not complete the segment fetch.
+                        lastHeartbeatAtMs = LiveDiagnostics.nowMs()
+                        LiveDiagnostics.info(
+                            "tcp heartbeat received while_fetching_sequence seq=$sequence " +
+                                "livenessTimerReset=true",
+                        )
+                    }
                 }
             }
-            @Suppress("UNREACHABLE_CODE") ElTcpFetchResult.NotPublished
+            @Suppress("UNREACHABLE_CODE") ElTcpFetchResult(ByteArray(0), 0L, false)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: ElTcpSegmentUnavailableException) {
@@ -357,6 +402,81 @@ internal class ElTcpSession(private val endpoint: ElTcpEndpoint) : Closeable {
         }
     }
 
+    /**
+     * After an f timeout, h is a synchronization fence. A delayed S/n/g/p
+     * response is ordered before its echo. Once every echo is drained, either
+     * return that delayed response or safely retry the outstanding command.
+     */
+    private fun probeAfterFetchTimeout(sequence: Long): FetchTimeoutRecovery {
+        var probesSent = 0
+        var probesReceived = 0
+        var delayedResponse: FetchReply? = null
+        var sendNextProbe = true
+
+        while (true) {
+            if (sendNextProbe && probesSent < MAX_RECOVERY_ECHO_PROBES) {
+                writeCommand(CMD_HEARTBEAT)
+                output?.flush() ?: throw IOException("ELTCP output is closed")
+                probesSent++
+                sendNextProbe = false
+                LiveDiagnostics.warn(
+                    "tcp fetch timeout echo probe seq=$sequence attempt=$probesSent/$MAX_RECOVERY_ECHO_PROBES",
+                )
+            }
+
+            setReadTimeout(HEARTBEAT_READ_TIMEOUT_MS)
+            val reply = try {
+                readFetchReply()
+            } catch (_: ElTcpFetchReplyTimeoutException) {
+                if (probesSent >= MAX_RECOVERY_ECHO_PROBES) {
+                    throw SocketTimeoutException(
+                        "ELTCP echo probes failed after $MAX_RECOVERY_ECHO_PROBES attempts for sequence $sequence",
+                    )
+                }
+                sendNextProbe = true
+                continue
+            }
+
+            when (reply) {
+                FetchReply.Heartbeat -> {
+                    probesReceived++
+                    lastHeartbeatAtMs = LiveDiagnostics.nowMs()
+                    LiveDiagnostics.info(
+                        "tcp fetch recovery echo received seq=$sequence received=$probesReceived/$probesSent",
+                    )
+                }
+                else -> {
+                    if (delayedResponse != null) {
+                        throw IOException("ELTCP returned multiple f responses before probe echoes for sequence $sequence")
+                    }
+                    delayedResponse = reply
+                    LiveDiagnostics.info(
+                        "tcp delayed f response recovered seq=$sequence " +
+                            "response=${reply.javaClass.simpleName}; draining probe echoes",
+                    )
+                }
+            }
+
+            if (probesReceived == probesSent) {
+                setReadTimeout(SEGMENT_READ_TIMEOUT_MS)
+                val pending = delayedResponse
+                if (pending != null) return FetchTimeoutRecovery.Response(pending)
+                LiveDiagnostics.info(
+                    "tcp fetch recovery socket_alive=true seq=$sequence retryRequest=true sameSocket=true",
+                )
+                return FetchTimeoutRecovery.RetryRequest
+            }
+            if (!sendNextProbe && probesSent < MAX_RECOVERY_ECHO_PROBES && delayedResponse == null) {
+                // If this echo is delayed, wait for it before sending another;
+                // otherwise its late byte could be mistaken for the next reply.
+                continue
+            }
+            if (delayedResponse != null && probesReceived < probesSent && probesSent < MAX_RECOVERY_ECHO_PROBES) {
+                sendNextProbe = false
+            }
+        }
+    }
+
     private fun connectIfNeeded() {
         val current = socketRef.get()
         if (current?.isConnected == true && !current.isClosed) return
@@ -390,10 +510,10 @@ internal class ElTcpSession(private val endpoint: ElTcpEndpoint) : Closeable {
         for (address in addresses) {
             val socket = Socket()
             try {
-                socket.tcpNoDelay = true
                 socket.keepAlive = true
                 val connectTimeoutMs = if (connectedOnce) RECONNECT_TIMEOUT_MS else INITIAL_CONNECT_TIMEOUT_MS
                 socket.connect(InetSocketAddress(address, endpoint.port), connectTimeoutMs)
+                socket.tcpNoDelay = true
                 socket.soTimeout = MANIFEST_READ_TIMEOUT_MS
                 connectedOnce = true
                 socketRef.set(socket)
@@ -751,6 +871,11 @@ internal class ElTcpSession(private val endpoint: ElTcpEndpoint) : Closeable {
 
     private data class FetchMetadata(val length: Int, val crc32c: Long, val flags: Int)
 
+    private sealed interface FetchTimeoutRecovery {
+        data object RetryRequest : FetchTimeoutRecovery
+        data class Response(val reply: FetchReply) : FetchTimeoutRecovery
+    }
+
     private sealed interface FetchReply {
         data class Ready(val bytes: ByteArray, val metadata: FetchMetadata) : FetchReply {
             val crc32c: Long get() = metadata.crc32c
@@ -759,11 +884,17 @@ internal class ElTcpSession(private val endpoint: ElTcpEndpoint) : Closeable {
         data object NotPublished : FetchReply
         data object Gone : FetchReply
         data object Unsupported : FetchReply
+        data object Heartbeat : FetchReply
     }
 
     private fun readFetchReply(): FetchReply {
         val stream = input ?: throw IOException("ELTCP input is closed")
-        val status = stream.read()
+        val status = try {
+            stream.read()
+        } catch (timeout: SocketTimeoutException) {
+            // Only a timeout before the response starts can be fenced with h.
+            throw ElTcpFetchReplyTimeoutException(timeout)
+        }
         if (status < 0) throw EOFException("ELTCP server closed the connection during f request")
         return when (status.toByte()) {
             RESPONSE_FETCH_SEGMENT -> {
@@ -783,6 +914,7 @@ internal class ElTcpSession(private val endpoint: ElTcpEndpoint) : Closeable {
             RESPONSE_NOT_PUBLISHED -> FetchReply.NotPublished
             RESPONSE_GONE -> FetchReply.Gone
             RESPONSE_FETCH_UNSUPPORTED -> FetchReply.Unsupported
+            RESPONSE_HEARTBEAT -> FetchReply.Heartbeat
             else -> throw IOException("Unexpected ELTCP f response byte $status")
         }
     }
@@ -832,10 +964,10 @@ internal class ElTcpSession(private val endpoint: ElTcpEndpoint) : Closeable {
         // With periodic heartbeats observed, two missed 3-second heartbeats
         // plus margin indicate a stalled connection while a manifest is pending.
         const val HEARTBEAT_MANIFEST_READ_TIMEOUT_MS = 7_500
-        const val SEGMENT_READ_TIMEOUT_MS = 3_000
-        const val HEARTBEAT_READ_TIMEOUT_MS = 1_500
+        const val SEGMENT_READ_TIMEOUT_MS = 30_000
+        const val HEARTBEAT_READ_TIMEOUT_MS = 1_000
         const val HEARTBEAT_PROBE_INTERVAL_MS = 30_000L
-        const val MAX_RECOVERY_ECHO_PROBES = 3
+        const val MAX_RECOVERY_ECHO_PROBES = 5
         const val MAX_SAME_SOCKET_SEGMENT_RETRIES = 2
         const val MAX_FRAME_BYTES = 1 shl 20
         const val MAX_CRC_RETRIES = 2
@@ -859,7 +991,6 @@ internal class ElTcpSession(private val endpoint: ElTcpEndpoint) : Closeable {
         const val FLAG_DISCONTINUITY = 0x01
         const val FLAGS_RESERVED_MASK = 0xfe
         const val MAX_FETCH_LENGTH_VARINT_BYTES = 5
-        const val FETCH_NOT_PUBLISHED_DELAY_MS = 1_000L
         val CRC_TABLE = IntArray(256) { entry ->
             var value = entry
             repeat(8) {

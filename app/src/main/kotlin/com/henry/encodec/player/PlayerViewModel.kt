@@ -153,7 +153,14 @@ private data class MediaPublishKey(
 
 class PlayerViewModel(application: Application) : AndroidViewModel(application) {
     private val playlistStore = PlaylistStore(application)
-    private val mutableState = MutableStateFlow(playlistStore.load())
+    private val stationCatalogCache = StationDirectoryCache(application)
+    private val restoredState = playlistStore.load()
+    private val cachedStationCatalog = runCatching {
+        stationCatalogCache.load(BuildConfig.STATION_CATALOG_URL)
+    }.getOrNull()
+    private val mutableState = MutableStateFlow(
+        restoredState.copy(catalog = cachedStationCatalog ?: restoredState.catalog),
+    )
     val state = mutableState.asStateFlow()
     private var playbackJob: Job? = null
     @Volatile private var session: EcdcPlaybackSession? = null
@@ -221,7 +228,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     fun loadStationCatalog() {
         stationCatalogJob?.cancel()
         stationCatalogJob = viewModelScope.launch {
-            mutableState.value = mutableState.value.copy(loadingCatalog = true, error = null)
+            mutableState.value = mutableState.value.copy(
+                loadingCatalog = mutableState.value.catalog.isEmpty(),
+                error = null,
+            )
             val loaded = runCatching {
                 withContext(Dispatchers.IO) {
                     val urls = stationCatalogUrls(BuildConfig.STATION_CATALOG_URL)
@@ -229,6 +239,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                         try {
                             val bytes = fetchStationCatalogBytes(urls.protobuf, "application/x-protobuf, application/octet-stream")
                             StationDirectoryParser.parseProtobuf(bytes).also {
+                                if (it.isNotEmpty()) stationCatalogCache.save(urls.protobuf, bytes)
                                 LiveDiagnostics.info("station catalog ready format=protobuf stations=${it.size} bytes=${bytes.size}")
                             }
                         } catch (cancelled: CancellationException) {
@@ -254,8 +265,11 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             mutableState.value = if (loaded.isSuccess) {
                 mutableState.value.copy(catalog = loaded.getOrThrow(), loadingCatalog = false,
                     error = if (loaded.getOrThrow().isEmpty()) "No valid stations were found in the radio list." else null)
-            } else mutableState.value.copy(loadingCatalog = false,
-                error = "Could not load radio list: ${loaded.exceptionOrNull()?.message ?: "network error"}")
+            } else mutableState.value.copy(
+                loadingCatalog = false,
+                error = if (mutableState.value.catalog.isNotEmpty()) null else
+                    "Could not load radio list: ${loaded.exceptionOrNull()?.message ?: "network error"}",
+            )
         }
     }
 

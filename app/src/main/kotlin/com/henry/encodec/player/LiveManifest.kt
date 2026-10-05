@@ -727,7 +727,7 @@ class LiveStreamSource(
                 var tcpSegmentInfo: LiveSegmentInfo? = null
                 val streamed = if (tcpActive && tcpSession!!.supportsAbsoluteSequenceFetch()) {
                     val fetched = if (isPendingProbe && prefetched != null && probeCrc32c != null) {
-                        ElTcpFetchResult.Ready(prefetched, probeCrc32c, probeDiscontinuity == true)
+                        ElTcpFetchResult(prefetched, probeCrc32c, probeDiscontinuity == true)
                     } else {
                         fetchTcpSequence(selected.sequence, manifestExpectedBytes)
                     }
@@ -854,15 +854,9 @@ class LiveStreamSource(
         return true
     }
 
-    private suspend fun fetchTcpSequence(sequence: Long, expectedByteLength: Int?): ElTcpFetchResult.Ready {
+    private suspend fun fetchTcpSequence(sequence: Long, expectedByteLength: Int?): ElTcpFetchResult {
         val session = tcpSession ?: throw IOException("ELTCP session is unavailable")
-        while (currentCoroutineContext().isActive) {
-            when (val result = session.fetchSequence(sequence, expectedByteLength)) {
-                is ElTcpFetchResult.Ready -> return result
-                ElTcpFetchResult.NotPublished -> delay(1_000L)
-            }
-        }
-        throw CancellationException("Live stream stopped while waiting for sequence $sequence")
+        return session.fetchSequence(sequence, expectedByteLength)
     }
 
     private fun cacheTcpManifest(bytes: ByteArray): LiveManifest {

@@ -1,6 +1,8 @@
 package com.henry.encodec.player
 
 import java.io.IOException
+import android.content.Context
+import android.util.Base64
 
 /** Decodes the small public station-directory schema without adding a protobuf runtime. */
 internal object StationDirectoryParser {
@@ -150,5 +152,32 @@ internal fun stationCatalogUrls(configuredUrl: String): StationCatalogUrls {
             json = configuredUrl,
         )
         else -> StationCatalogUrls(protobuf = null, json = configuredUrl)
+    }
+}
+
+/** Stores the last valid protobuf catalog so stations are available before a network refresh. */
+internal class StationDirectoryCache(context: Context) {
+    private val preferences = context.getSharedPreferences("station_directory_cache", Context.MODE_PRIVATE)
+
+    fun load(configuredUrl: String): List<RadioStation>? {
+        val protobufUrl = stationCatalogUrls(configuredUrl).protobuf ?: return null
+        if (preferences.getString(KEY_URL, null) != protobufUrl) return null
+        val encoded = preferences.getString(KEY_BYTES, null) ?: return null
+        return runCatching {
+            StationDirectoryParser.parseProtobuf(Base64.decode(encoded, Base64.DEFAULT))
+                .takeIf { it.isNotEmpty() }
+        }.getOrNull()
+    }
+
+    fun save(protobufUrl: String, bytes: ByteArray) {
+        preferences.edit()
+            .putString(KEY_URL, protobufUrl)
+            .putString(KEY_BYTES, Base64.encodeToString(bytes, Base64.NO_WRAP))
+            .apply()
+    }
+
+    private companion object {
+        const val KEY_URL = "protobuf_url"
+        const val KEY_BYTES = "protobuf_bytes"
     }
 }

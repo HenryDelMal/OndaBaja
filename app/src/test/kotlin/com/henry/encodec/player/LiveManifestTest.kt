@@ -93,6 +93,7 @@ class LiveManifestTest {
         val requests = mutableListOf<Long>()
         val source = LiveStreamSource(
             MANIFEST_URL.replace("stream.json", "index.json"),
+            preferProtobuf = false,
             startupLookbackMs = 30_000,
             fetchManifestBytes = {
                 fetches++
@@ -284,9 +285,10 @@ class LiveManifestTest {
             var manifestFetches = 0
             val fetchedSequences = mutableListOf<Long>()
             val source = LiveStreamSource(
-                // This fixture returns JSON only; avoid a sibling protobuf
-                // probe advancing its simulated manifest before JSON is read.
+                // This fixture returns JSON only; explicitly disable the
+                // sibling protobuf probe in this simulated server.
                 MANIFEST_URL.replace("stream.json", "index.json"),
+                preferProtobuf = false,
                 startupLookbackMs = 12_000,
             fetchManifestBytes = {
                     manifestFetches++
@@ -328,6 +330,7 @@ class LiveManifestTest {
         var failSecondSegmentOnce = true
         val source = LiveStreamSource(
             MANIFEST_URL.replace("stream.json", "index.json"),
+            preferProtobuf = false,
             startupLookbackMs = 12_000,
             fetchManifestBytes = {
                 manifestFetches++

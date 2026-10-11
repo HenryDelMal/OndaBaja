@@ -274,7 +274,10 @@ class AudioTrackSink(
         require(minBuffer > 0) {
             "unsupported minimum buffer ($minBuffer)"
         }
-        val requestedBuffer = if (attempt.bufferSeconds > 0) {
+        // Android 8–11 cannot lower the start threshold independently of
+        // track capacity. Use the minimum PCM buffer so a short first segment
+        // can become audible; the downloaded-segment queue provides lookahead.
+        val requestedBuffer = if (attempt.bufferSeconds > 0 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             sampleRate * channels * bytesPerSample * attempt.bufferSeconds
         } else {
             minBuffer

@@ -369,11 +369,14 @@ private fun EmergencyRadioScreen(model: PlayerViewModel, mode: InterfaceMode, on
                         }
                     }
                 }
+                if (state.statsEnabled && state.live != null) LiveStatsCard(state.live!!)
                 NowPlayingCard(state, model)
             }
             RadioPage.SETTINGS -> SettingsPage(Modifier.weight(1f), mode, onModeChange, onAdvanced = { page = RadioPage.ADVANCED })
             RadioPage.ADVANCED -> AdvancedSettingsPage(
                 Modifier.weight(1f), state.diagnosticsEnabled, model::toggleDiagnostics,
+                statsEnabled = state.statsEnabled,
+                onStatsChange = model::setStatsEnabled,
                 networkProtocol = networkProtocol,
                 compressionPreference = compressionPreference,
                 tcpEnabled = tcpEnabled,
@@ -436,6 +439,8 @@ private fun AdvancedSettingsPage(
     modifier: Modifier,
     debugLogs: Boolean,
     onDebugChange: () -> Unit,
+    statsEnabled: Boolean,
+    onStatsChange: (Boolean) -> Unit,
     networkProtocol: NetworkProtocolMode,
     compressionPreference: HttpCompressionPreference,
     tcpEnabled: Boolean,
@@ -444,6 +449,19 @@ private fun AdvancedSettingsPage(
     onTcpEnabledChange: (Boolean) -> Unit,
 ) {
     Column(modifier.fillMaxWidth().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        SettingsSection("Estadísticas de reproducción") {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Mostrar estadísticas en la pantalla principal", fontWeight = FontWeight.Medium)
+                    Text("Muestra la velocidad de recepción aproximada de la aplicación, la tasa de audio y los segmentos en búfer.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(checked = statsEnabled, onCheckedChange = onStatsChange)
+            }
+            Text("La velocidad es un promedio móvil de 10 segundos e incluye el tráfico recibido por la aplicación, como audio y solicitudes de red.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         SettingsSection("Transporte TCP personalizado") {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
@@ -550,6 +568,35 @@ private fun AdvancedSettingsPage(
             Text("El tráfico total es una estimación a nivel de la aplicación e incluye otros intercambios de red que coincidan durante cada medición. Android no expone por separado el coste de DNS, TCP, TLS y cabeceras HTTP para cada solicitud.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+    }
+}
+
+@Composable
+private fun LiveStatsCard(live: LiveUiState) {
+    Card(
+        Modifier.fillMaxWidth().padding(bottom = 10.dp),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 11.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            StatsValue("RED · 10 S", live.appReceiveKbps?.let { "%.1f Kbps".format(java.util.Locale.ROOT, it) } ?: "—")
+            StatsValue("AUDIO", live.bandwidthKbps?.let { "%.1f Kbps".format(java.util.Locale.ROOT, it) } ?: "—")
+            StatsValue("EN BÚFER", "${live.bufferedSegments}")
+        }
+    }
+}
+
+@Composable
+private fun RowScope.StatsValue(label: String, value: String) {
+    Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontWeight = FontWeight.Bold, letterSpacing = 0.7.sp)
+        Text(value, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface)
     }
 }
 

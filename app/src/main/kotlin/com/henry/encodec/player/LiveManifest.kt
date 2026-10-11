@@ -741,7 +741,9 @@ class LiveStreamSource(
                     verifySegment(fetched.bytes, tcpSegmentInfo!!, activeInit)
                     ByteArrayInputStream(fetched.bytes) to fetched.bytes.size
                 } else if (tcpActive) {
-                    val bytes = tcpSession!!.fetchSegment(activeManifest, selected)
+                    // Legacy s also downloads the full initialization file.
+                    // Reuse it for startup rather than requesting it twice.
+                    val bytes = prefetched ?: tcpSession!!.fetchSegment(activeManifest, selected)
                     verifySegment(bytes, selected, activeInit)
                     ByteArrayInputStream(bytes) to bytes.size
                 } else if (fetchSegmentBytes == null) {

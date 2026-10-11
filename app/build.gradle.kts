@@ -44,8 +44,8 @@ android {
         applicationId = "cl.cuy.emergencyradio"
         minSdk = 26
         targetSdk = 35
-        versionCode = 101
-        versionName = "1.0.33"
+        versionCode = 103
+        versionName = "1.0.35"
         buildConfigField("String", "STATION_CATALOG_URL", buildConfigString(configuredCatalogUrl))
         buildConfigField("String", "DECODER_MODEL_ASSET", buildConfigString(configuredModelAsset))
         buildConfigField("String", "DECODER_MODEL_SHA256", buildConfigString(configuredModelSha256))

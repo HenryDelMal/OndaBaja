@@ -67,6 +67,7 @@ class LiveEcdcPlaybackSession(
                 var started = false
                 var initialStats: SegmentStats? = null
                 while (!stopRequested && initialStats == null) {
+                    var announced = false
                     report("audio initial segment seq=${initialSegment.sequence} ${sink.diagnosticState()}")
                     try {
                         initialStats = initialSegment.input.use { input ->
@@ -78,7 +79,12 @@ class LiveEcdcPlaybackSession(
                                     started = true
                                     report("audio start seq=${initialSegment.sequence} ${sink.diagnosticState()}")
                                 }
-                                write(sink, pcm)
+                                val written = write(sink, pcm)
+                                if (written && !announced) {
+                                    announced = true
+                                    onSegmentPlaying(initialSegment.sequence)
+                                }
+                                written
                             }
                         }
                     } catch (error: java.io.IOException) {
@@ -93,7 +99,6 @@ class LiveEcdcPlaybackSession(
                 }
                 if (!started || stopRequested || initialStats == null) return@withContext
                 logSegment(initialSegment.sequence, initialStats, sink)
-                if (!stopRequested) onSegmentPlaying(initialSegment.sequence)
                 while (!stopRequested) {
                     coroutineContext.ensureActive()
                     report("audio request next ${sink.diagnosticState()}")
@@ -108,9 +113,10 @@ class LiveEcdcPlaybackSession(
                         if (!paused) sink.resume()
                     }
                     try {
-                        val stats = segment.input.use { decodeAndWrite(it, sink) }
+                        val stats = segment.input.use {
+                            decodeAndWrite(it, sink) { onSegmentPlaying(segment.sequence) }
+                        }
                         logSegment(segment.sequence, stats, sink)
-                        if (!stopRequested) onSegmentPlaying(segment.sequence)
                     } catch (error: java.io.IOException) {
                         report("audio segment interrupted seq=${segment.sequence} " +
                             "reason=${error.javaClass.simpleName} message=${error.message}")
@@ -127,8 +133,17 @@ class LiveEcdcPlaybackSession(
         }
     }
 
-    private fun decodeAndWrite(input: InputStream, sink: AudioTrackSink): SegmentStats =
-        decode(input) { write(sink, it) }
+    private fun decodeAndWrite(input: InputStream, sink: AudioTrackSink, onFirstPcmWritten: () -> Unit): SegmentStats {
+        var announced = false
+        return decode(input) { pcm ->
+            val written = write(sink, pcm)
+            if (written && !announced) {
+                announced = true
+                onFirstPcmWritten()
+            }
+            written
+        }
+    }
 
     private fun decode(input: InputStream, emit: (DecodedPcm) -> Boolean): SegmentStats {
         val wallStarted = System.nanoTime()
